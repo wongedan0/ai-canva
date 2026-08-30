@@ -1,9 +1,9 @@
 # Sprint 1
-1. Read the "What is AI Canva?" guide [x]
-2. Read your brief and pick your box / lock your team roles [x]
-3. Choose your research question and find 3 sources [x]
-4. Clone the repo and get it running (npm run dev) [x]
-5. Register your first box in types.ts [x]
+- [x] Read the "What is AI Canva?" guide
+- [x] Read your brief and pick your box / lock your team roles
+- [x] Choose your research question and find 3 sources
+- [x] Clone the repo and get it running (npm run dev)
+- [x] Register your first box in types.ts
 
 ## Chosen research question and 3 sources
 Is LLM redaction trustworthy vs deterministic tools?
