@@ -710,7 +710,14 @@ export const useBoardStore = create<BoardState>()(
               }
             }
 
-            if (boxType === "slides") {
+            if (boxType === "swot") {
+              // SWOT is just text output — the AI already formatted it as Markdown.
+              get().updateBoxData(id, {
+                output: result.content,
+                status: "done",
+                error: undefined,
+              });
+            } else if (boxType === "slides") {
               // Parse the LLM's JSON output into a slide deck
               const slides = parseSlidesResponse(result.content);
               get().updateBoxData(id, {

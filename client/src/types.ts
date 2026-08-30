@@ -1,4 +1,4 @@
-export type BoxType = "idea" | "research" | "summarize" | "image" | "cartoon" | "slides" | "code" | "prd" | "devplan" | "ui" | "stitch" | "note" | "label" | "timer" | "custom";
+export type BoxType = "idea" | "research" | "summarize" | "image" | "cartoon" | "slides" | "code" | "prd" | "devplan" | "ui" | "stitch" | "swot" | "note" | "label" | "timer" | "custom";
 
 export type BoxStatus = "idle" | "running" | "done" | "error";
 
@@ -243,6 +243,21 @@ export const BOX_TYPES: Record<BoxType, BoxTypeMeta> = {
     defaultSystemPrompt: "",
     defaultWidth: 440,
     defaultHeight: 420,
+  },
+  swot: {
+    label: "SWOT",                 // the name shown in the sidebar
+    icon: "⚖️",                    // the icon shown
+    color: "#f59e0b",             // a colour (amber here)
+    description: "Analyse any idea and produce a SWOT (Strengths, Weaknesses, Opportunities, Threats).",
+    hasAI: true,                   // true = it calls the AI when you press Run
+    category: "worker",            // "worker" = it processes input (vs "input" = just text you type)
+    roles: ["everyone"],
+    defaultPrompt:
+      "Turn the following into a SWOT analysis. Use four sections — Strengths, Weaknesses, Opportunities, Threats — as bullet points under each.\n\nIdea:\n{{input_1}}",
+    defaultSystemPrompt:
+      "You are a business analyst. Produce a clear, balanced SWOT analysis in Markdown. Be specific and honest about weaknesses.",
+    defaultWidth: 320,             // starting box width
+    defaultHeight: 320,            // starting box height
   },
   note: {
     label: "Note",
