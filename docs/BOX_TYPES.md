@@ -37,9 +37,55 @@ URL.
 - **Outputs:** an image URL (used as `imageData` input by Cartoon boxes).
 - **Settings:** none (input box).
 
+### 📎 Documents — `documents`
+
+Upload one or more documents (click or drag & drop; PDF, DOCX, TXT, MD, CSV, JSON). Text is
+extracted **in the browser** — plain-text formats are read directly, PDFs via pdf.js and Word
+files via mammoth (both loaded on demand, so they don't slow down the app until needed). The
+combined, filename-labeled text becomes the box's output, so any connected AI box can use it via
+`{{inputs}}`, `{{Box Name}}`, or `{{input_N}}` — e.g. connect Documents → Summarize to condense a
+report, or Documents → PRD to turn a spec into a product doc.
+
+- **Inputs:** none (no target handle).
+- **Outputs:** every document's extracted text, each labeled `=== filename ===`. Extraction is
+  capped at 100k chars per file and 400k chars per box (oversized files are marked *truncated*)
+  so boards stay within Firestore's 1MB document limit.
+- **Persistence:** the extracted text lives in the board itself (syncs to collaborators and
+  survives reloads). The original file is also uploaded to Firebase Storage when signed in
+  ("Open original ↗" link); when signed out, only the text is kept.
+- **Settings:** none (input box).
+
 ---
 
 ## Worker boxes
+
+### 🤖 Agent — `agent`
+
+Give the agent a **task** (typed in its box) and click Run: it autonomously completes the task
+by using the board as its workspace. Each turn the model returns one structured action —
+`add_box` (create a new AI box with a task-specific prompt), `connect` (wire two boxes),
+`run_box` (run a box through the normal pipeline and read its output back), or `finish`
+(write the final Markdown answer into the box). The step-by-step transcript is shown live in
+the box (and synced to collaborators); the boxes it creates are ordinary boxes you can inspect,
+rerun, and take over. Runs entirely client-side on top of the regular boxes/`runBox` machinery
+— no backend endpoints were added.
+
+- **AI:** Ollama, multiple controller turns (default system prompt = the JSON action protocol).
+- **Budget:** 12 controller turns (`MAX_AGENT_TURNS` in `client/src/lib/agent.ts`); the final
+  turn forces a wrap-up. Unparseable replies are coached and retried (2×), then the raw reply is
+  kept as the answer so the run never hangs. ⏹ Stop halts the loop between turns.
+- **Can create:** `idea`, `research`, `summarize`, `prd`, `devplan`, `slides`, `code`, `ui` —
+  never upload boxes (Image/Documents), `cartoon`/`stitch` (image/async paths), other agents,
+  or itself.
+- **Inputs:** connected boxes flow into the agent's context (like `{{inputs}}`); its `content`
+  field is the task.
+- **Output:** the final Markdown answer (also usable by downstream boxes).
+- **Settings:** "Extra guidance for the agent" (the prompt field) + the protocol system prompt
+  (advanced). The step transcript persists in `boxData.agentSteps`.
+- **Code:** parsing/inventory/layout in `client/src/lib/agent.ts` (unit-tested); the loop in
+  `boardStore.ts` (`runAgentLoop`); UI in `BoxNode.tsx` (the `isAgent` branch).
+- **Caveat:** the controller is only as good as the model behind `/api/generate` — strict-JSON
+  adherence varies by local model, which is why the loop is defensive (retry → coach → salvage).
 
 ### 🔍 Research — `research`
 

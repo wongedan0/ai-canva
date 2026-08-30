@@ -1,4 +1,4 @@
-export type BoxType = "idea" | "research" | "summarize" | "image" | "cartoon" | "slides" | "code" | "prd" | "devplan" | "ui" | "stitch" | "redactor" | "note" | "label" | "timer" | "custom";
+export type BoxType = "agent" | "idea" | "research" | "summarize" | "image" | "documents" | "cartoon" | "slides" | "code" | "prd" | "devplan" | "ui" | "stitch" | "swot" | "redactor" | "note" | "label" | "timer" | "custom";
 
 export type BoxStatus = "idle" | "running" | "done" | "error";
 
@@ -7,6 +7,31 @@ export interface Slide {
   title: string;
   bullets: string[];
   notes?: string;
+}
+
+/**
+ * A document attached to a Documents box. All fields are always defined (no
+ * `undefined`) so the object survives Firestore writes, which reject
+ * `undefined` anywhere in a nested value.
+ */
+export interface BoxDocument {
+  id: string;
+  /** Original filename (kept for labeling in prompts and the file list). */
+  name: string;
+  /** Raw file size in bytes. */
+  size: number;
+  /** Lowercase extension without the dot ("pdf", "txt", …). */
+  ext: string;
+  /** Storage download URL — "" when the file was not uploaded (local mode). */
+  url: string;
+  /** Extracted text — "" when extraction failed (see error). */
+  text: string;
+  /** Characters of extracted text actually kept (after any truncation). */
+  chars: number;
+  /** True when the extracted text was capped (see lib/documents.ts limits). */
+  truncated: boolean;
+  /** "" when extraction succeeded, otherwise a short failure reason. */
+  error: string;
 }
 
 /** A user currently active on a board with their cursor position. */
@@ -29,6 +54,59 @@ export interface NamedInput {
   output: string;
 }
 
+/**
+ * One recorded step of an Agent box run (a plan note, a board action, or a
+ * completion/error marker). Persisted in the box's `agentSteps` so the
+ * transcript survives reloads and is visible to every board collaborator.
+ */
+export interface AgentStep {
+  id: string;
+  /** Kind of step — drives the icon and color in the box's timeline. */
+  type: "plan" | "add_box" | "connect" | "run" | "finish" | "stopped" | "error";
+  /** Human-readable one-liner shown in the log. */
+  label: string;
+  /** Optional extra detail (model reasoning, parse error preview). */
+  detail?: string;
+  /** Board box id affected by this step (add_box / run). */
+  boxId?: string;
+  /** Epoch ms when the step happened. */
+  at: number;
+}
+
+/**
+ * The Agent box's controller system prompt. Defines the environment and the
+ * strict one-action-per-turn JSON protocol the model must follow
+ * (see client/src/lib/agent.ts for the parser and boardStore for the loop).
+ */
+export const AGENT_CONTROLLER_SYSTEM_PROMPT = `You are an autonomous AI agent working inside a collaborative whiteboard app ("AI Canva"). The whiteboard is your workspace: you complete tasks by creating BOXES on the board, wiring them together, and running them. Each box is an AI worker with a type and a prompt you write for it.
+
+## Box types you can create
+- "idea" — a plain text note (no AI; give it \`content\` with the text)
+- "research" — deep research on a topic → Markdown report
+- "summarize" — combines its inputs into a concise summary
+- "prd" — turns research into a Product Requirements Document
+- "devplan" — turns a PRD into a short technical build plan
+- "slides" — generates a pitch deck (JSON-driven slide deck)
+- "code" — generates a working React prototype (live preview on the board)
+- "ui" — generates a polished React UI prototype with Tailwind (live preview)
+
+## Protocol
+Each turn you take EXACTLY ONE action. Reply with ONLY one JSON object — no markdown fences, no commentary, no text before or after.
+
+- Create a box:  {"action":"add_box","ref":"r1","boxType":"research","title":"Market research","prompt":"full prompt template for this box","content":"optional initial text (only useful for idea boxes)"}
+- Wire boxes:    {"action":"connect","from":"r1","to":"r2"}   (refs of boxes you created, or titles of existing board boxes)
+- Run a box:     {"action":"run_box","box":"r1"}              → its output is returned to you in the next turn
+- Finish:        {"action":"finish","answer":"final Markdown answer to the user"}
+
+## Rules
+- ONE action per reply, and nothing but the JSON object.
+- Prefer a small pipeline: usually create 2-4 boxes, connect them into a chain, then run them in order.
+- Write each box's \`prompt\` so the box is self-contained and specific to THIS task (do not leave generic template text). Boxes pull their inputs from boxes connected upstream, available to them as {{inputs}}.
+- Run boxes in dependency order — a box run before its upstream boxes have run gets no input.
+- NEVER run or create an agent box, and never run the same box twice.
+- Use existing boxes on the board when relevant (their titles are listed below) instead of recreating them.
+- You have a limited step budget — plan to finish comfortably. When everything has run and the task is satisfiable, call finish with a concise Markdown answer summarizing what you built and the key results.`;
+
 /** Data stored per-box, separate from React Flow's graph nodes. */
 export interface BoxData {
   content: string;
@@ -39,11 +117,15 @@ export interface BoxData {
   error?: string;
   imageData?: string;
   outputImage?: string;
+  /** For Documents boxes: the uploaded files + their extracted text. */
+  documents?: BoxDocument[];
   slides?: Slide[];
   /** For Code boxes: the generated React component code (JSX). */
   code?: string;
   /** Token usage from the most recent LLM call for this box (text AI boxes). */
   tokens?: { promptTokens: number; completionTokens: number; totalTokens: number };
+  /** For Agent boxes: the step log of the most recent (or current) run. */
+  agentSteps?: AgentStep[];
   /** For Note boxes: who created the note (set once at creation). */
   authorEmail?: string;
   authorName?: string;
@@ -98,6 +180,19 @@ export const BOX_TYPES: Record<BoxType, BoxTypeMeta> = {
     defaultWidth: 320,
     defaultHeight: 200,
   },
+  agent: {
+    label: "Agent",
+    icon: "🤖",
+    color: "#4f46e5",
+    description: "Give the agent a task — it plans, creates boxes on the board, wires and runs them, then reports back.",
+    hasAI: true,
+    category: "worker",
+    roles: ["everyone"],
+    defaultPrompt: "",
+    defaultSystemPrompt: AGENT_CONTROLLER_SYSTEM_PROMPT,
+    defaultWidth: 400,
+    defaultHeight: 480,
+  },
   research: {
     label: "Research",
     icon: "🔍",
@@ -140,6 +235,20 @@ export const BOX_TYPES: Record<BoxType, BoxTypeMeta> = {
     defaultSystemPrompt: "",
     defaultWidth: 320,
     defaultHeight: 320,
+  },
+  documents: {
+    label: "Documents",
+    icon: "📎",
+    color: "#64748b",
+    description:
+      "Upload PDF, Word, or text files. Their extracted text becomes input for downstream boxes via {{inputs}}.",
+    hasAI: false,
+    category: "input",
+    roles: ["everyone"],
+    defaultPrompt: "",
+    defaultSystemPrompt: "",
+    defaultWidth: 340,
+    defaultHeight: 380,
   },
   cartoon: {
     label: "Cartoon Profile",
@@ -243,6 +352,21 @@ export const BOX_TYPES: Record<BoxType, BoxTypeMeta> = {
     defaultSystemPrompt: "",
     defaultWidth: 440,
     defaultHeight: 420,
+  },
+  swot: {
+    label: "SWOT",                 // the name shown in the sidebar
+    icon: "⚖️",                    // the icon shown
+    color: "#f59e0b",             // a colour (amber here)
+    description: "Analyse any idea and produce a SWOT (Strengths, Weaknesses, Opportunities, Threats).",
+    hasAI: true,                   // true = it calls the AI when you press Run
+    category: "worker",            // "worker" = it processes input (vs "input" = just text you type)
+    roles: ["everyone"],
+    defaultPrompt:
+      "Turn the following into a SWOT analysis. Use four sections — Strengths, Weaknesses, Opportunities, Threats — as bullet points under each.\n\nIdea:\n{{input_1}}",
+    defaultSystemPrompt:
+      "You are a business analyst. Produce a clear, balanced SWOT analysis in Markdown. Be specific and honest about weaknesses.",
+    defaultWidth: 320,             // starting box width
+    defaultHeight: 320,            // starting box height
   },
   redactor: {
     label: "Privacy Redactor",

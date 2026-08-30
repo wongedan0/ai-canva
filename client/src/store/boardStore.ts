@@ -10,10 +10,22 @@ import {
   type EdgeChange,
   type Connection,
 } from "@xyflow/react";
-import type { BoxData, BoxType, BoxStatus, NamedInput } from "../types.js";
-import { BOX_TYPES } from "../types.js";
+import type { BoxData, BoxType, BoxStatus, NamedInput, AgentStep } from "../types.js";
+import { BOX_TYPES, AGENT_CONTROLLER_SYSTEM_PROMPT } from "../types.js";
 import { generate, generateImage, generateStitchUI } from "../lib/api.js";
 import { fillPromptTemplate, getBoxOutput } from "../lib/prompts.js";
+import {
+  MAX_AGENT_TURNS,
+  MAX_PARSE_RETRIES,
+  AGENT_OUTPUT_CLIP,
+  buildBoardInventory,
+  buildTurnPrompt,
+  describeAction,
+  nextAgentChildPosition,
+  parseAgentAction,
+  clip,
+} from "../lib/agent.js";
+import { buildDocumentsOutput } from "../lib/documents.js";
 import { extractCode } from "../lib/code.js";
 import { parseSlidesResponse } from "../lib/slides.js";
 import { cleanBoxDataForFirestore } from "../lib/serialization.js";
@@ -78,6 +90,71 @@ let presenceHeartbeat: ReturnType<typeof setInterval> | null = null;
 let boardUnsub: (() => void) | null = null;
 let presenceUnsub: (() => void) | null = null;
 
+// Agent runs that a user asked to stop — checked between agent turns (the
+// current LLM call/run always finishes; the loop halts before the next one).
+const agentCancelled = new Set<string>();
+
+interface CollectedInputs {
+  namedInputs: NamedInput[];
+  inputImage?: string;
+}
+
+/**
+ * Gathers upstream inputs for a box: walks incoming edges, collects text
+ * outputs (documents boxes contribute their extracted-file text) and the
+ * first image input. Also includes the box's own `content` so AI boxes work
+ * standalone — pass `skipSelf: true` to exclude it (the Agent box uses this,
+ * since its `content` is the task and travels in the context separately).
+ */
+function collectInputs(
+  nodes: Node[],
+  edges: Edge[],
+  boxData: Record<string, BoxData>,
+  id: string,
+  opts: { skipSelf?: boolean } = {}
+): CollectedInputs {
+  let inputImage: string | undefined;
+  const namedInputs: NamedInput[] = [];
+
+  const incomingEdges = edges.filter((e) => e.target === id);
+  for (const edge of incomingEdges) {
+    const sourceData = boxData[edge.source];
+    const sourceNode = nodes.find((n) => n.id === edge.source);
+    if (sourceData) {
+      // Check for image data (from Image Upload boxes)
+      if (sourceData.imageData) {
+        if (!inputImage) inputImage = sourceData.imageData;
+      }
+      // Gather text output with the source box name. Documents boxes
+      // derive their output from the extracted file text (labeled by
+      // filename) — see lib/documents.ts.
+      const textOutput = sourceData.documents?.length
+        ? buildDocumentsOutput(sourceData.documents)
+        : getBoxOutput(sourceData.output, sourceData.content);
+      if (textOutput) {
+        namedInputs.push({
+          name: (sourceNode?.data?.title as string) || "Unnamed",
+          output: textOutput,
+        });
+      }
+    }
+  }
+
+  if (!opts.skipSelf) {
+    const data = boxData[id];
+    const node = nodes.find((n) => n.id === id);
+    // Also include this box's own content (lets AI boxes work standalone)
+    if (data && data.content && data.content.trim()) {
+      namedInputs.push({
+        name: (node?.data?.title as string) || "This Box",
+        output: data.content.trim(),
+      });
+    }
+  }
+
+  return { namedInputs, inputImage };
+}
+
 function defaultBoxData(type: BoxType): BoxData {
   const meta = BOX_TYPES[type];
   return {
@@ -88,6 +165,7 @@ function defaultBoxData(type: BoxType): BoxData {
     status: "idle" as BoxStatus,
     imageData: undefined,
     outputImage: undefined,
+    documents: undefined,
     ...(type === "timer"
       ? { timerDurationMs: DEFAULT_TIMER_MS, timerStatus: "idle" as const }
       : null),
@@ -122,6 +200,11 @@ interface BoardState {
   setBoxName: (id: string, name: string) => void;
   deleteBox: (id: string) => void;
   runBox: (id: string) => Promise<void>;
+  /** Programmatic edge creation — used by the Agent box to wire the boxes it
+   *  makes. Dedupes and rejects self-connections like a manual connect. */
+  connectBoxes: (sourceId: string, targetId: string) => boolean;
+  /** Ask a running Agent box to stop after its current turn. */
+  stopAgent: (id: string) => void;
 
   setBoxStatus: (id: string, status: BoxStatus, error?: string) => void;
 
@@ -322,6 +405,51 @@ export const useBoardStore = create<BoardState>()(
 
       setBoxStatus: (id, status, error) => {
         get().updateBoxData(id, { status, error });
+      },
+
+      connectBoxes: (sourceId, targetId) => {
+        if (!sourceId || !targetId || sourceId === targetId) return false;
+        const edges = get().edges;
+        const exists = edges.some(
+          (e) => e.source === sourceId && e.target === targetId
+        );
+        if (exists) return false;
+        set({
+          edges: rfAddEdge(
+            {
+              source: sourceId,
+              target: targetId,
+              sourceHandle: null,
+              targetHandle: null,
+              animated: true,
+            } as Connection,
+            edges
+          ),
+        });
+        scheduleSave();
+        return true;
+      },
+
+      stopAgent: (id) => {
+        if (get().boxData[id]?.status !== "running") {
+          agentCancelled.delete(id);
+          return;
+        }
+        agentCancelled.add(id);
+        // Immediate feedback: the loop halts after the current turn
+        // (LLM call / box run in flight always completes).
+        const existing = get().boxData[id]?.agentSteps || [];
+        get().updateBoxData(id, {
+          agentSteps: [
+            ...existing,
+            {
+              id: makeId(),
+              at: Date.now(),
+              type: "stopped" as const,
+              label: "Stop requested — halting after the current step…",
+            },
+          ],
+        });
       },
 
       // --- Firestore board operations ---
@@ -604,42 +732,20 @@ export const useBoardStore = create<BoardState>()(
           return;
         }
 
+        // The Agent box runs its own multi-turn loop (create/connect/run
+        // boxes on the board) — it manages its own status and inputs.
+        if (boxType === "agent") {
+          await runAgentLoop(id);
+          return;
+        }
+
         // Gather upstream inputs
-        const incomingEdges = state.edges.filter((e) => e.target === id);
-
-        // Separate image inputs from text inputs
-        let inputImage: string | undefined;
-        const namedInputs: NamedInput[] = [];
-
-        for (const edge of incomingEdges) {
-          const sourceData = state.boxData[edge.source];
-          const sourceNode = state.nodes.find((n) => n.id === edge.source);
-          if (sourceData) {
-            // Check for image data (from Image Upload boxes)
-            if (sourceData.imageData) {
-              if (!inputImage) inputImage = sourceData.imageData;
-            }
-            // Gather text output with the source box name
-            const textOutput = getBoxOutput(
-              sourceData.output,
-              sourceData.content
-            );
-            if (textOutput) {
-              namedInputs.push({
-                name: (sourceNode?.data?.title as string) || "Unnamed",
-                output: textOutput,
-              });
-            }
-          }
-        }
-
-        // Also include this box's own content (lets AI boxes work standalone)
-        if (data.content && data.content.trim()) {
-          namedInputs.push({
-            name: (node.data?.title as string) || "This Box",
-            output: data.content.trim(),
-          });
-        }
+        const { namedInputs, inputImage } = collectInputs(
+          state.nodes,
+          state.edges,
+          state.boxData,
+          id
+        );
 
         // Set running state
         get().setBoxStatus(id, "running");
@@ -710,7 +816,14 @@ export const useBoardStore = create<BoardState>()(
               }
             }
 
-            if (boxType === "slides") {
+            if (boxType === "swot") {
+              // SWOT is just text output — the AI already formatted it as Markdown.
+              get().updateBoxData(id, {
+                output: result.content,
+                status: "done",
+                error: undefined,
+              });
+            } else if (boxType === "slides") {
               // Parse the LLM's JSON output into a slide deck
               const slides = parseSlidesResponse(result.content);
               get().updateBoxData(id, {
@@ -760,3 +873,330 @@ export const useBoardStore = create<BoardState>()(
     }
   )
 );
+
+// ============================================================
+// Agent box — a multi-turn autonomous loop driven by the LLM.
+//
+// The board is the agent's toolbox: each turn the model returns ONE JSON
+// action (add_box / connect / run_box / finish) which is executed against
+// the board with the regular store actions. Created boxes are normal boxes —
+// the user can watch the agent build a pipeline live, stop it, and take the
+// boxes over afterwards. Everything is client-side: no backend changes.
+// ============================================================
+
+/**
+ * Resolves an agent reference (a ref like "r1" the agent coined for boxes
+ * it created this run, or the title of a board box) to a node id.
+ */
+function resolveAgentBoxRef(key: string, refs: Record<string, string>): string | null {
+  const k = key.trim().toLowerCase();
+  if (!k) return null;
+  if (refs[k]) return refs[k];
+  const match = useBoardStore
+    .getState()
+    .nodes.find((n) => {
+      if (n.type === "area") return false;
+      const title = ((n.data?.title as string) || "").trim().toLowerCase();
+      return title === k;
+    });
+  return match?.id ?? null;
+}
+
+async function runAgentLoop(agentId: string) {
+  const get = () => useBoardStore.getState();
+
+  const startNode = get().nodes.find((n) => n.id === agentId);
+  const startData = get().boxData[agentId];
+  if (!startNode || !startData) return;
+  if (startData.status === "running") return;
+
+  const task = (startData.content || "").trim();
+  if (!task) {
+    get().setBoxStatus(
+      agentId,
+      "error",
+      "Give the agent a task first — type it in the box, then run again."
+    );
+    return;
+  }
+
+  /** Appends one step to the agent's persisted transcript. */
+  const pushStep = (step: Omit<AgentStep, "id" | "at">) => {
+    const existing = get().boxData[agentId]?.agentSteps || [];
+    get().updateBoxData(agentId, {
+      agentSteps: [...existing, { id: makeId(), at: Date.now(), ...step }],
+    });
+  };
+
+  // Fresh transcript + status for each run.
+  get().updateBoxData(agentId, {
+    status: "running",
+    error: undefined,
+    output: "",
+    tokens: undefined,
+    agentSteps: [],
+  });
+
+  const steps: string[] = []; // human-readable lines fed back each turn
+  const refs: Record<string, string> = {}; // ref (lowercased) → box id
+  let refSeq = 0;
+  let childSeq = 0;
+  let parseFailures = 0;
+  const usage = { promptTokens: 0, completionTokens: 0, totalTokens: 0 };
+  let lastResult = "(This is the start of the run — take your first action.)";
+
+  try {
+    for (let turn = 0; turn < MAX_AGENT_TURNS; turn++) {
+      // Cooperative stop: checked before every turn — an in-flight LLM call
+      // or box run always completes first.
+      if (agentCancelled.has(agentId)) {
+        pushStep({ type: "stopped", label: "Stopped — the agent ended the run here." });
+        get().updateBoxData(agentId, {
+          status: "done",
+          error: undefined,
+          output:
+            get().boxData[agentId]?.output ||
+            "Stopped before finishing. The boxes created so far are still on the board — run the agent again to continue.",
+        });
+        return;
+      }
+
+      // Re-read state every turn: the board may have changed (remotely too).
+      const data = get().boxData[agentId];
+      const node = get().nodes.find((n) => n.id === agentId);
+      if (!data || !node) return;
+
+      // The final turn forces a wrap-up instead of another board action.
+      const isWrapUp = turn === MAX_AGENT_TURNS - 1;
+
+      const { namedInputs } = collectInputs(
+        get().nodes,
+        get().edges,
+        get().boxData,
+        agentId,
+        { skipSelf: true } // the task itself is already the "Task" section
+      );
+      const refLabels = Object.entries(refs).map(([ref, id]) => {
+        const n = get().nodes.find((x) => x.id === id);
+        return [ref, `"${(n?.data?.title as string) || id}" (${n?.type})`] as [string, string];
+      });
+
+      const res = await generate({
+        systemPrompt: data.systemPrompt || AGENT_CONTROLLER_SYSTEM_PROMPT,
+        userPrompt: buildTurnPrompt({
+          task,
+          guidance: data.prompt || undefined,
+          inputs: namedInputs,
+          inventory: buildBoardInventory(get().nodes, get().edges, get().boxData),
+          refs: Object.fromEntries(refLabels),
+          steps,
+          lastResult,
+          wrapUp: isWrapUp,
+        }),
+      });
+
+      // Token accounting — same ledger as every other box, cumulative here.
+      if (res.usage) {
+        usage.promptTokens += res.usage.promptTokens;
+        usage.completionTokens += res.usage.completionTokens;
+        usage.totalTokens += res.usage.totalTokens;
+        get().updateBoxData(agentId, { tokens: { ...usage } });
+        const user = useAuthStore.getState().user;
+        if (user) {
+          recordTokenUsage(
+            user.uid,
+            get().currentBoardId || "",
+            agentId,
+            "agent",
+            res.usage
+          );
+          useTokenStore.getState().addTokens(res.usage.totalTokens);
+        }
+      }
+      if (res.error) throw new Error(res.error);
+
+      const parsed = parseAgentAction(res.content);
+
+      // Unparseable reply — coach the model and retry; after too many
+      // consecutive failures, salvage the run with what we have.
+      if (!parsed.ok) {
+        if (isWrapUp || parseFailures >= MAX_PARSE_RETRIES) {
+          const fallback =
+            (res.content || "").trim() ||
+            "The agent could not complete its task (kept replying outside the action protocol).";
+          pushStep({
+            type: "error",
+            label: "Gave up on protocol replies — kept the last reply as the answer.",
+            detail: clip(res.content, 200),
+          });
+          get().updateBoxData(agentId, { status: "done", error: undefined, output: fallback });
+          return;
+        }
+        parseFailures += 1;
+        pushStep({
+          type: "error",
+          label: "Reply was not one valid JSON action — retrying.",
+          detail: clip(res.content, 200),
+        });
+        lastResult = `Your last reply was DISCARDED: ${parsed.error} Reply with exactly ONE JSON object (no prose, no markdown).`;
+        continue;
+      }
+      parseFailures = 0;
+      const action = parsed.action;
+
+      // ---- add_box ----
+      if (action.action === "add_box") {
+        const agentNode = get().nodes.find((n) => n.id === agentId);
+        const agentStyle = agentNode?.style;
+        const agentWidth =
+          typeof agentStyle?.width === "number"
+            ? agentStyle.width
+            : BOX_TYPES.agent.defaultWidth;
+        const pos = nextAgentChildPosition(
+          agentNode?.position || { x: 100, y: 100 },
+          agentWidth,
+          childSeq++
+        );
+        const newId = get().addBox(action.boxType, pos);
+        let ref = action.ref;
+        if (!ref || refs[ref]) ref = `r${++refSeq}`;
+        refs[ref.toLowerCase()] = newId;
+
+        const title = action.title || BOX_TYPES[action.boxType].label + " Box";
+        get().setBoxName(newId, title);
+        const patch: Partial<BoxData> = {};
+        if (action.prompt) patch.prompt = action.prompt;
+        if (action.content) {
+          patch.content = action.content;
+          // Idea boxes are pure content — make their text flow downstream.
+          if (action.boxType === "idea") patch.output = action.content;
+        }
+        if (Object.keys(patch).length > 0) get().updateBoxData(newId, patch);
+
+        pushStep({ type: "add_box", label: describeAction(action) + ` · ref ${ref}`, boxId: newId });
+        steps.push(`${describeAction(action)} (ref ${ref}) — ok`);
+        lastResult = `Created ${ref} → "${title}" (${action.boxType}).${
+          action.prompt ? " Its prompt was set." : ""
+        } Connect it or run it when ready.`;
+        continue;
+      }
+
+      // ---- connect ----
+      if (action.action === "connect") {
+        const fromId = resolveAgentBoxRef(action.from, refs);
+        const toId = resolveAgentBoxRef(action.to, refs);
+        const describe = describeAction(action);
+        const typeOf = (id: string | null) => {
+          if (!id) return "";
+          return (
+            (useBoardStore.getState().nodes.find((n) => n.id === id)?.type as string) || ""
+          );
+        };
+        if (!fromId || !toId) {
+          pushStep({ type: "error", label: describe, detail: "Could not resolve one of the boxes." });
+          lastResult = `Connection failed — "${action.from}" or "${action.to}" did not match any box. Use a ref you created or an exact board box title.`;
+          continue;
+        }
+        if (fromId === toId || fromId === agentId || toId === agentId || typeOf(fromId) === "agent" || typeOf(toId) === "agent") {
+          pushStep({ type: "error", label: describe, detail: "Agent boxes cannot be wired into pipelines." });
+          lastResult = "Connection rejected: never connect or run agent boxes. Pick your created boxes or ordinary board boxes.";
+          continue;
+        }
+        const added = get().connectBoxes(fromId, toId);
+        pushStep({
+          type: "connect",
+          label: describe + (added ? "" : " (already connected)"),
+        });
+        steps.push(describe + (added ? " — ok" : " — already existed"));
+        lastResult = added
+          ? "Wired. Note: a box pulls its upstream input when IT runs, so run upstream boxes first."
+          : "Those two boxes were already connected.";
+        continue;
+      }
+
+      // ---- run_box ----
+      if (action.action === "run_box") {
+        const describe = describeAction(action);
+        const boxId = resolveAgentBoxRef(action.box, refs);
+        if (!boxId) {
+          pushStep({ type: "error", label: describe, detail: "No box matches this ref or title." });
+          lastResult = `"${action.box}" matched no box. Use one of your refs or an exact board box title.`;
+          continue;
+        }
+        const state = get();
+        const targetNode = state.nodes.find((n) => n.id === boxId);
+        const bd = state.boxData[boxId];
+        if (!targetNode || !bd) {
+          pushStep({ type: "error", label: describe, detail: "That box no longer exists." });
+          lastResult = `The box "${action.box}" was deleted — drop it from your plan.`;
+          continue;
+        }
+        if (targetNode.type === "agent") {
+          pushStep({ type: "error", label: describe, detail: "An agent cannot run itself or another agent." });
+          lastResult = "Never run agent boxes. Run one of your created/ordinary boxes or call finish.";
+          continue;
+        }
+        // Already-done boxes are reused, not re-run (cheap + idempotent).
+        const existingOut = bd.output || bd.content || (bd.outputImage ? "(image)" : "");
+        if (bd.status === "done" && existingOut) {
+          pushStep({ type: "run", label: describe + " — already done, reused its output", boxId });
+          steps.push(describe + " — already done");
+          lastResult = `Box "${targetNode.data?.title}" already ran. Output:\n"""\n${clip(existingOut, AGENT_OUTPUT_CLIP)}\n"""`;
+          continue;
+        }
+
+        pushStep({ type: "run", label: describe + "…", boxId });
+        await get().runBox(boxId);
+        const after = get().boxData[boxId];
+        const title = (targetNode.data?.title as string) || action.box;
+        if (!after) {
+          pushStep({ type: "error", label: describe, detail: "That box was deleted while running." });
+          lastResult = `The box "${title}" was deleted — adjust your plan.`;
+          continue;
+        }
+        if (after.status === "error") {
+          pushStep({ type: "run", label: describe + " — failed", detail: after.error, boxId });
+          steps.push(`${describe} — failed`);
+          lastResult = `Box "${title}" FAILED: ${after.error || "unknown error"}. You can add a replacement box with a simpler prompt, or finish explaining what happened.`;
+          continue;
+        }
+        const out = after.output || after.content || (after.outputImage ? "(generated an image)" : "");
+        pushStep({
+          type: "run",
+          label: describe + ` — done (${(after.output || "").length} chars)`,
+          boxId,
+        });
+        steps.push(`${describe} — ok`);
+        lastResult = `Output of "${title}":\n"""\n${clip(out, AGENT_OUTPUT_CLIP)}\n"""`;
+        continue;
+      }
+
+      // ---- finish ----
+      pushStep({ type: "finish", label: "Task complete ✓" });
+      get().updateBoxData(agentId, {
+        status: "done",
+        error: undefined,
+        output:
+          action.answer?.trim() ||
+          "The agent finished. See the step log below for what it created and ran on the board.",
+      });
+      return;
+    }
+
+    // Loop exhausted without finish — close the run gracefully (the wrap-up
+    // turn usually prevents this; this is the safety net).
+    get().updateBoxData(agentId, {
+      status: "done",
+      error: undefined,
+      output:
+        get().boxData[agentId]?.output ||
+        "The agent reached its step budget before finishing. The boxes it created are still on the board — you can run them yourself or re-run the agent.",
+    });
+  } catch (err: any) {
+    const message = err?.message || "Agent run failed";
+    pushStep({ type: "error", label: "Run failed", detail: message });
+    get().setBoxStatus(agentId, "error", message);
+  } finally {
+    agentCancelled.delete(agentId);
+  }
+}

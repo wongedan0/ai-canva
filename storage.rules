@@ -7,5 +7,12 @@ service firebase.storage {
       allow read: if request.auth != null;
       allow write: if request.auth != null;
     }
+
+    // Board documents (Documents box uploads) — same policy as images.
+    // Recursive so each box can hold many timestamped files.
+    match /boards/{boardId}/documents/{docPath=**} {
+      allow read: if request.auth != null;
+      allow write: if request.auth != null;
+    }
   }
 }

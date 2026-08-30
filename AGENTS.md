@@ -4,6 +4,11 @@ This file is auto-loaded into the AI agent's context at the start of every sessi
 Harness reads `AGENTS.md` / `CLAUDE.md` from the project root). It captures durable project
 knowledge so it survives across sessions. Keep it current — it is the first thing an agent reads.
 
+**Session bootstrap:** after this file, read `docs/DEVLOG.md` (newest entries first) to pick up
+the current in-flight state without re-exploring the codebase. When you finish a unit of work,
+append a short entry there — and a new session should be able to cold-start from these two files
+alone.
+
 ## What this project is
 
 **AI Canva** is a collaborative, AI-powered whiteboard for building visual AI pipelines. Users
@@ -25,7 +30,7 @@ to box — from an Idea, through Research, to PRD / Slides / Code / UI Design / 
 | `server/` | Local Express dev backend (`/api/generate`, `/api/generate-image`, `/api/stitch-generate`, `/api/health`). |
 | `functions/` | Same API as a Firebase Cloud Function (`onRequest`) for production. Also hosts `src/stitchJobs.ts` (the async Stitch Cloud Task worker). |
 | `scripts/deploy.sh` | One-command production deploy (build client, build Functions, deploy Hosting + Functions + rules). |
-| `docs/` | Guides: `OVERVIEW`, `ONBOARDING`, `ARCHITECTURE`, `BOX_TYPES`, `API`, `DEPLOYMENT`, `OSS_READINESS`, plus `docs/course/` teaching materials. |
+| `docs/` | Guides: `OVERVIEW`, `ONBOARDING`, `ARCHITECTURE`, `BOX_TYPES`, `API`, `DEPLOYMENT`, `OSS_READINESS`, plus `docs/course/` teaching materials. `docs/DEVLOG.md` is the session journal (read at session start, append after finishing work). |
 | `firebase.json`, `firestore.rules`, `storage.rules` | Firebase config and security rules. |
 | `dsh-plugins/` | Out-of-tree plugins for the DeepSeek Harness Web GUI (not part of the app). See "dsh GUI plugins" below. |
 
@@ -68,15 +73,16 @@ npm run deploy         # = bash scripts/deploy.sh (production Firebase deploy)
   `.server-port`, and listens. Write route tests against `createApp()` via supertest instead of
   starting the server.
 - **Client pure logic lives in `client/src/lib/`** and is unit-tested: prompt templating
-  (`prompts.ts`), code/HTML wrapping (`code.ts`), slides JSON parsing (`slides.ts`), and Firestore
-  save serialization (`serialization.ts`). `boardStore.ts` imports these rather than inlining them.
+  (`prompts.ts`), code/HTML wrapping (`code.ts`), slides JSON parsing (`slides.ts`), Firestore
+  save serialization (`serialization.ts`), Documents-box text handling (`documents.ts`), and the
+  Agent box action protocol (`agent.ts`). `boardStore.ts` imports these rather than inlining them.
 - **Prompt templating** references connected inputs by name: `{{Box Name}}`, `{{input_1}}`,
   `{{inputs}}`.
-- **14 built-in box types** plus user-created custom boxes: Idea, Image, Research, Summarize, PRD,
-  Dev Plan, Cartoon Profile, Slides, Code, UI Design, Stitch UI, three collaboration boxes (Note,
-  Label, Timer), and the `custom` runtime type (see "Custom boxes" below). Categories:
-  `input`, `worker`, `collab` (standalone annotation tools: no AI, no Run, no handles), and
-  `custom` (the user's saved templates). See `docs/BOX_TYPES.md`.
+- **16 built-in box types** plus user-created custom boxes: Agent, Idea, Image, Documents,
+  Research, Summarize, PRD, Dev Plan, Cartoon Profile, Slides, Code, UI Design, Stitch UI, three
+  collaboration boxes (Note, Label, Timer), and the `custom` runtime type (see "Custom boxes"
+  below). Categories: `input`, `worker`, `collab` (standalone annotation tools: no AI, no Run, no
+  handles), and `custom` (the user's saved templates). See `docs/BOX_TYPES.md`.
 
 ## UI design system
 
@@ -199,7 +205,17 @@ The app reports per-call LLM token usage and tracks cumulative usage per user an
   grants the facilitator role to a test user via the Firestore admin REST API (OAuth token from
   firebase-tools), then drives the dashboard (workshop → template → team → seat codes), joins as
   a guest in a fresh context (code → profile modal → team board → own board → team board visible
-  in the list), and cleans everything up. Result at time of writing: **75/75 passed**.
+  in the list), and cleans everything up. Result at time of writing: **80/80 passed** (75 base
+  + 5 "TD" Documents-box tests).
+- **E2E environment gotchas:** (1) The firebase-tools access token
+  (`~/.config/configstore/firebase-tools.json`) **expires ~hourly**; a stale token makes the
+  facilitator PATCH silently 401 → the "TF facilitator button appears after grant" check FAILS.
+  Refresh by running any `firebase` CLI command (e.g. `firebase projects:list`) before the suite.
+  (2) **Never run the E2E while another session is editing `client/src`** — Vite HMR/full reloads
+  mid-run cause scattered, different failures each run (missing buttons, empty outputs,
+  `window.__dsh` undefined). Run it in a quiet window (no src writes for ~2 min). (3) Deps used
+  only by the suite must be in `client/package.json` — an ad-hoc `npm install` without `--save`
+  gets pruned by the next install (that silently removed `playwright-core` once).
 - **UI text markers the E2E clicks by** (keep these EXACT strings when restyling — the suite
   finds buttons by `textContent`, not selectors): header `Boards (` and `New Board` (capital B)
   and `🧑‍🏫 Facilitator`; palette rows keep the box label as the button's trailing text
@@ -214,6 +230,24 @@ The app reports per-call LLM token usage and tracks cumulative usage per user an
 ## Conventions & gotchas
 
 - **Adding a new box type:** see `docs/BOX_TYPES.md` and `docs/course/05_how_to_build_a_box.md`.
+- **Agent box (🤖, first worker in the palette):** users type a task and Run — the LLM acts as an
+  autonomous controller that manipulates the BOARD: each controller turn returns exactly ONE JSON
+  action (`add_box` / `connect` / `run_box` / `finish`), executed with the regular store actions,
+  so the boxes an agent creates are ordinary boxes everyone can edit afterwards. Loop lives in
+  `boardStore.ts` (`runAgentLoop`, invoked from the `boxType === "agent"` branch of `runBox` — it
+  manages its own status/inputs and bypasses the shared gathering); protocol/inventory/layout in
+  `client/src/lib/agent.ts` (pure, unit-tested; `AGENT_CREATABLE_TYPES` whitelist = idea research
+  summarize prd devplan slides code ui — never image/documents/cartoon/stitch/agent); UI (task
+  textarea + live `agentSteps` timeline + ⏹ Stop so the loop halts between turns) in `BoxNode.tsx`.
+  Running a box from the agent is a plain `await runBox(boxId)` — the target box's status/output is
+  read back after. Budget: `MAX_AGENT_TURNS` (12) with a forced wrap-up on the last turn; 2
+  consecutive unparseable replies are coached then the raw reply is salvaged as the answer, so a
+  weak model degrades to "honest free text" instead of hanging. Stop is cooperative:
+  `agentCancelled` module Set checked before each turn — an in-flight LLM call/run always
+  completes. Steps persist in `boxData.agentSteps` (Firestore-safe: no `undefined` values —
+  `detail`/`boxId` optional only when present). Token accounting reuses the standard ledger with
+  `boxType: "agent"` (cumulative on the box). Multiplayer: another client sees the log grow via
+  snapshots but a mid-run reload of the runner just stops the loop (run-like other boxes).
 - **Collaboration boxes (note / label / timer) are standalone:** category `"collab"`, `hasAI:
   false`, and no connection handles, no Run button, no ⚙ panel — gate all of those in
   `BoxNode.tsx` on `!isUtility` and keep the `runBox` early-return guard in `boardStore.ts`.
@@ -236,6 +270,27 @@ The app reports per-call LLM token usage and tracks cumulative usage per user an
   `Sidebar.tsx` filter which boxes appear in the "Add Box" palette. This is a discovery-only label —
   a pure UI filter, never a permission. Add sensible `roles` tags when adding a box; see
   `docs/BOX_TYPES.md`.
+- **Documents box (📎, input category):** multi-file upload (click or drag & drop) whose extracted
+  text becomes the box's output for downstream prompts. All logic lives in
+  `client/src/lib/documents.ts` (unit-tested): txt/md/csv/json are read as text directly; **PDF**
+  uses `pdfjs-dist` and **DOCX** uses `mammoth`, both **lazy-imported** so neither (~0.5MB each)
+  touches the main bundle until that file type is uploaded. pdf.js's worker is loaded via
+  `import("pdfjs-dist/build/pdf.worker.min.mjs?url")` — that needs `client/src/vite-env.d.ts`
+  (`/// <reference types="vite/client" />`) for TS and works in both dev and build. **Budgets:**
+  extracted text is capped at 100k chars per document and 400k chars per box (`clampDocText` /
+  `remainingDocBudget`) so the board doc stays under Firestore's 1MB limit; entries that fail
+  extraction are kept with an `error` message instead of being dropped. **`BoxDocument` fields are
+  always defined** (no `undefined`) — Firestore rejects `undefined` nested anywhere in a value.
+  The raw file is uploaded best-effort to Storage at `boards/{boardId}/documents/{boxId}/…`
+  (`uploadDocumentToStorage`, rules added to `storage.rules` — **deploy rules** for it to work);
+  the extracted text always lives in `boxData.documents`, so prompts, persistence, and cross-user
+  sync work even when the upload fails (signed-out local mode). Downstream integration is one line
+  in `runBox`: a source box with documents contributes `buildDocumentsOutput()` (each doc labeled
+  `=== filename ===`) instead of `getBoxOutput()` — reference with `{{inputs}}`, `{{Box Name}}`, or
+  `{{input_N}}` like any input. The E2E "TD" tests cover the flow, using a page-level fetch
+  intercept of `/api/generate` to assert the labeled doc text reaches the connected box's prompt
+  deterministically (mocked response — restore `window.fetch` afterwards so later tests hit the
+  real API).
 - **Landing page:** the logged-out entry is a full marketing page in
   `client/src/components/landing/` (`LandingPage.tsx` composes `LandingNav`, `LandingHero`,
   `LandingHowItWorks`, `LandingFeatures`, `LandingBoxes`, `LandingRoles`, `LandingCTA`,
@@ -404,6 +459,9 @@ app; the directory just lives in this repo so the plugins stay under version con
 
 ## Docs to keep in mind
 
+- `docs/DEVLOG.md` — **session journal**: newest-first dated entries of what changed, what's in
+  flight, next steps. Read at session start (after this file); append an entry per finished unit
+  of work. State lives here, knowledge lives in this file.
 - `docs/ARCHITECTURE.md` — deep dive into client, backend, and Firebase layers.
 - `docs/API.md` — backend endpoints and environment variables.
 - `docs/DEPLOYMENT.md` — production deploy steps.
@@ -419,6 +477,7 @@ add, change, or remove a feature, keep this file in sync in the same change:
 - Add/update the box type, endpoint, directory, or command that changed.
 - Update the box-type list, architecture notes, or conventions if they changed.
 - Keep the "Repository layout" and "Key commands" tables accurate.
+- Append a short entry to `docs/DEVLOG.md` (Done / In flight / Next steps).
 
 If a change is too small to warrant a doc update, at least note it here so the knowledge is not
 lost. Treat this file as living documentation, not a static snapshot.
