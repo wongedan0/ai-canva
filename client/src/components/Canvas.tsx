@@ -23,10 +23,12 @@ import AreaNode from "./AreaNode.js";
 import Cursors from "./Cursors.js";
 
 const nodeTypes = {
+  agent: BoxNode,
   idea: BoxNode,
   research: BoxNode,
   summarize: BoxNode,
   image: BoxNode,
+  documents: BoxNode,
   cartoon: BoxNode,
   slides: BoxNode,
   code: BoxNode,
@@ -196,10 +198,12 @@ export default function Canvas() {
         zoomable
         nodeColor={(node: Node) => {
           const colors: Record<string, string> = {
+            agent: "#4f46e5",
             idea: "#fbbf24",
             research: "#60a5fa",
             summarize: "#a78bfa",
             image: "#34d399",
+            documents: "#64748b",
             cartoon: "#f472b6",
             slides: "#fb923c",
             code: "#22d3ee",

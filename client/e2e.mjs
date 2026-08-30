@@ -374,6 +374,137 @@ const waitFor = async (fn, { timeout = 20000, every = 500, label = "" } = {}) =>
   }
 };
 
+// ---------- TD: Documents box — upload, extraction, and prompt flow ----------
+await safe("TD documents flow", async () => {
+  // Add a Documents box through the real palette.
+  const before = await page.evaluate(() => window.__dsh.useBoardStore.getState().nodes.length);
+  await page.evaluate(() => {
+    const btn = Array.from(document.querySelectorAll("button")).find((b) =>
+      (b.textContent || "").trim().endsWith("Documents")
+    );
+    btn && btn.click();
+  });
+  await page.waitForTimeout(600);
+  const added = await page.evaluate((b) => window.__dsh.useBoardStore.getState().nodes.length === b + 1, before);
+  check("TD documents box added via palette", added);
+
+  // Helper: put files on the box's hidden multi-file input (native setter).
+  const uploadFiles = (files) =>
+    page.evaluate((f) => {
+      const dt = new DataTransfer();
+      for (const { name, content, type } of f) dt.items.add(new File([content], name, { type }));
+      const inp = document.querySelector("input[accept*='.pdf']");
+      if (!inp) throw new Error("documents input not found");
+      inp.files = dt.files;
+      inp.dispatchEvent(new Event("change", { bubbles: true }));
+    }, files);
+
+  // 1) A plain text file — extraction is synchronous-fast.
+  await uploadFiles([{ name: "spec.txt", content: "The quarterly roadmap targets DOC-PIPELINE-OK.", type: "text/plain" }]);
+  const txtDone = await waitFor(async () =>
+    page.evaluate(() => {
+      const s = window.__dsh.useBoardStore.getState();
+      const docs = Object.values(s.boxData).flatMap((b) => b.documents || []);
+      return docs.find((d) => d.name === "spec.txt" && d.chars > 0 && !d.error) || null;
+    }), { label: "txt extraction", timeout: 15000 });
+  check("TD txt extracted and stored", !!txtDone, JSON.stringify(txtDone || ""));
+
+  // 2) A minimal hand-written PDF — exercises the lazy pdf.js path.
+  const pdfBytes =
+    "%PDF-1.4\n" +
+    "1 0 obj << /Type /Catalog /Pages 2 0 R >> endobj\n" +
+    "2 0 obj << /Type /Pages /Kids [3 0 R] /Count 1 >> endobj\n" +
+    "3 0 obj << /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Contents 4 0 R /Resources << /Font << /F1 5 0 R >> >> >> endobj\n" +
+    "4 0 obj << /Length 52 >> stream\n" +
+    "BT /F1 24 Tf 72 700 Td (Hello Canva Documents) Tj ET\n" +
+    "endstream endobj\n" +
+    "5 0 obj << /Type /Font /Subtype /Type1 /BaseFont /Helvetica >> endobj\n" +
+    "trailer << /Size 6 /Root 1 0 R >>\n%%EOF";
+  await uploadFiles([{ name: "tiny.pdf", content: pdfBytes, type: "application/pdf" }]);
+  const pdfDone = await waitFor(async () =>
+    page.evaluate(() => {
+      const s = window.__dsh.useBoardStore.getState();
+      const docs = Object.values(s.boxData).flatMap((b) => b.documents || []);
+      return docs.find((d) => d.name === "tiny.pdf") || null;
+    }), { label: "pdf extraction", timeout: 30000 });
+  check(
+    "TD pdf extracted via lazy pdf.js",
+    !!pdfDone && !pdfDone.error && /Hello Canva Documents/.test(pdfDone.text || ""),
+    JSON.stringify(pdfDone ? { error: pdfDone.error, chars: pdfDone.chars, head: (pdfDone.text || "").slice(0, 40) } : "")
+  );
+
+  // 3) The extracted text must reach a connected AI box's prompt. Intercept
+  //    /api/generate (mock response) so the assertion is deterministic.
+  const docsBoxId = await page.evaluate(() => {
+    const s = window.__dsh.useBoardStore.getState();
+    const n = s.nodes.find((x) => (x.data.boxType || x.type) === "documents");
+    return n ? n.id : null;
+  });
+  await page.evaluate(() => {
+    const btn = Array.from(document.querySelectorAll("button")).find((b) =>
+      (b.textContent || "").trim().endsWith("Summarize")
+    );
+    btn && btn.click();
+  });
+  await page.waitForTimeout(500);
+  await page.evaluate((srcId) => {
+    const s = window.__dsh.useBoardStore.getState();
+    const target = s.nodes.find((x) => (x.data.boxType || x.type) === "summarize");
+    s.onConnect({ source: srcId, target: target.id, sourceHandle: null, targetHandle: null });
+  }, docsBoxId);
+  await page.waitForTimeout(400);
+
+  await page.evaluate(() => {
+    window.__e2e_gen = [];
+    window.__e2e_origFetch = window.fetch;
+    window.fetch = async (url, init) => {
+      if (String(url).includes("/api/generate")) {
+        window.__e2e_gen.push(init?.body ? JSON.parse(init.body) : null);
+        return new Response(
+          JSON.stringify({ content: "ECHO", model: "mock", usage: { promptTokens: 1, completionTokens: 1, totalTokens: 2 } }),
+          { status: 200, headers: { "Content-Type": "application/json" } }
+        );
+      }
+      return window.__e2e_origFetch(url, init);
+    };
+  });
+  await page.evaluate(() => {
+    const s = window.__dsh.useBoardStore.getState();
+    const target = s.nodes.find((x) => (x.data.boxType || x.type) === "summarize");
+    const btn = Array.from(document.querySelectorAll("button")).find(
+      (b) => /▶ Run/.test(b.textContent || "") && b.closest(`.react-flow__node[data-id="${target.id}"]`)
+    );
+    btn && btn.click();
+  });
+  const genBody = await waitFor(async () => {
+    const calls = await page.evaluate(() => window.__e2e_gen);
+    return calls.length ? calls[calls.length - 1] : null;
+  }, { label: "generate call", timeout: 15000 });
+  // Restore the real fetch so nothing after this sees the mock.
+  await page.evaluate(() => { window.fetch = window.__e2e_origFetch; });
+
+  check(
+    "TD document text flows into a connected box's prompt",
+    !!genBody &&
+      /=== spec\.txt ===/.test(genBody.userPrompt || "") &&
+      /DOC-PIPELINE-OK/.test(genBody.userPrompt || "") &&
+      /=== tiny\.pdf ===/.test(genBody.userPrompt || ""),
+    JSON.stringify((genBody ? genBody.userPrompt : "") || "").slice(0, 120)
+  );
+
+  // 4) Removing a document updates the store.
+  await page.evaluate(() => {
+    const rm = Array.from(document.querySelectorAll("button")).find((b) => b.title === "Remove this document");
+    rm && rm.click();
+  });
+  const afterRemove = await page.evaluate(() => {
+    const s = window.__dsh.useBoardStore.getState();
+    const docs = Object.values(s.boxData).flatMap((b) => b.documents || []);
+    return docs.length;
+  });
+  check("TD document removed from the box", afterRemove === 1, `docs=${afterRemove}`);
+});
+
 // Close the fake-user page — the rest runs in fresh, isolated contexts.
 await page.close();
 

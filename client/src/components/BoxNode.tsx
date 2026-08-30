@@ -13,7 +13,20 @@ import {
   isTimerFinished,
   parseDurationInput,
 } from "../lib/timer.js";
-import { uploadImageToStorage } from "../lib/storage.js";
+import { uploadImageToStorage, uploadDocumentToStorage } from "../lib/storage.js";
+import {
+  SUPPORTED_DOC_EXTS,
+  buildDocumentsOutput,
+  clampDocText,
+  docExt,
+  documentIcon,
+  extractDocumentText,
+  formatBytes,
+  isSupportedDocument,
+  makeDocId,
+  remainingDocBudget,
+} from "../lib/documents.js";
+import type { BoxDocument } from "../types.js";
 import sdk from "@stackblitz/sdk";
 import { toStackBlitzProject } from "../lib/project.js";
 // Lazy-load the code editor so CodeMirror (~500KB) is only fetched when a
@@ -87,6 +100,7 @@ function BoxNode({ id, data, selected, type }: NodeProps) {
   const updateBoxData = useBoardStore((s) => s.updateBoxData);
   const deleteBox = useBoardStore((s) => s.deleteBox);
   const runBox = useBoardStore((s) => s.runBox);
+  const stopAgent = useBoardStore((s) => s.stopAgent);
   const edges = useBoardStore((s) => s.edges);
   const allNodes = useBoardStore((s) => s.nodes);
   const setBoxName = useBoardStore((s) => s.setBoxName);
@@ -97,6 +111,10 @@ function BoxNode({ id, data, selected, type }: NodeProps) {
   const [codeMaximized, setCodeMaximized] = useState(false);
   const [copied, setCopied] = useState(false);
   const [previewLoading, setPreviewLoading] = useState(false);
+  // Documents box: how many files are mid-extraction right now (transient UI
+  // state — the durable results live in boxData.documents).
+  const [docBusy, setDocBusy] = useState(0);
+  const [docDragOver, setDocDragOver] = useState(false);
   const [isEditingName, setIsEditingName] = useState(false);
   const [nameDraft, setNameDraft] = useState("");
   // Label box: click-to-edit text (same pattern as the box-name editor).
@@ -174,12 +192,14 @@ function BoxNode({ id, data, selected, type }: NodeProps) {
   if (!boxData) return null;
 
   const isIdea = boxType === "idea";
+  const isAgent = boxType === "agent";
   const isImage = boxType === "image";
+  const isDocuments = boxType === "documents";
   const isCartoon = boxType === "cartoon";
   const isSlides = boxType === "slides";
   const isCode = boxType === "code" || boxType === "ui" || boxType === "stitch";
   const isStitch = boxType === "stitch";
-  const isInputBox = isIdea || isImage;
+  const isInputBox = isIdea || isImage || isDocuments;
   // Collaboration boxes (note / label / timer) are standalone annotations:
   // no AI, no Run button, no settings panel, and no connection handles.
   const isNote = boxType === "note";
@@ -319,6 +339,74 @@ function BoxNode({ id, data, selected, type }: NodeProps) {
     } catch (err) {
       console.error("Image upload failed:", err);
     }
+  };
+
+  // ===== Documents box =====
+
+  /**
+   * Processes uploaded/dropped files one at a time: extract text client-side,
+   * trim it to the box's remaining budget, best-effort upload the raw file to
+   * Storage, then append the entry to boxData.documents so it syncs and
+   * persists. Failed extractions become entries with an error message (never
+   * thrown away silently).
+   */
+  const handleDocumentsUpload = async (files: FileList | File[] | null) => {
+    if (!files || files.length === 0) return;
+    const boardId = useBoardStore.getState().currentBoardId;
+    const list = Array.from(files).slice(0, 10); // sane per-batch cap
+    setDocBusy((n) => n + list.length);
+    for (const file of list) {
+      let entry: BoxDocument;
+      try {
+        const raw = await extractDocumentText(file);
+        const budget = remainingDocBudget(
+          useBoardStore.getState().boxData[id]?.documents
+        );
+        const { text, truncated } = clampDocText(raw, budget);
+        // Best-effort raw-file upload so the original stays downloadable.
+        let url = "";
+        if (boardId) {
+          try {
+            url = await uploadDocumentToStorage(boardId, id, file);
+          } catch (err) {
+            console.warn("Document upload to storage failed (text is kept):", err);
+          }
+        }
+        entry = {
+          id: makeDocId(file.name, file.size),
+          name: file.name,
+          size: file.size,
+          ext: docExt(file.name),
+          url,
+          text,
+          chars: text.length,
+          truncated,
+          error: text
+            ? ""
+            : "This box's document-text budget is used up — remove other files first.",
+        };
+      } catch (err: any) {
+        entry = {
+          id: makeDocId(file.name, file.size),
+          name: file.name,
+          size: file.size,
+          ext: docExt(file.name),
+          url: "",
+          text: "",
+          chars: 0,
+          truncated: false,
+          error: err?.message || "Could not extract text from this file.",
+        };
+      }
+      const existing = useBoardStore.getState().boxData[id]?.documents || [];
+      updateBoxData(id, { documents: [...existing, entry] });
+      setDocBusy((n) => Math.max(0, n - 1));
+    }
+  };
+
+  const removeDocument = (docId: string) => {
+    const existing = useBoardStore.getState().boxData[id]?.documents || [];
+    updateBoxData(id, { documents: existing.filter((d) => d.id !== docId) });
   };
 
   const handleCopyCode = async () => {
@@ -572,6 +660,78 @@ function BoxNode({ id, data, selected, type }: NodeProps) {
           />
         )}
 
+        {/* Agent box — task + live step timeline + final answer */}
+        {isAgent && (() => {
+          const stepsList = boxData.agentSteps || [];
+          const stepIcon: Record<string, string> = {
+            plan: "🧠",
+            add_box: "➕",
+            connect: "🔗",
+            run: "▶️",
+            finish: "✅",
+            stopped: "⏹️",
+            error: "⚠️",
+          };
+          const stepColor: Record<string, string> = {
+            finish: "text-emerald-600",
+            stopped: "text-amber-600",
+            error: "text-red-600",
+          };
+          return (
+            <div className="flex flex-col gap-2 min-h-[140px]">
+              <textarea
+                className="nodrag nowheel w-full min-h-[64px] resize-y rounded-lg border border-indigo-200 p-2 text-sm text-slate-700 focus:outline-none focus:ring-2 focus:ring-indigo-300"
+                placeholder="Describe the task for the agent, e.g. “Turn this idea into a full pitch: research it, write a PRD, and build a landing page prototype”"
+                value={boxData.content}
+                onChange={(e) => updateBoxData(id, { content: e.target.value })}
+              />
+              {isRunning && stepsList.length === 0 && (
+                <div className="flex items-center gap-2 text-indigo-500 text-sm py-2 justify-center">
+                  <span className="animate-spin">🤖</span>
+                  <span>Planning…</span>
+                </div>
+              )}
+              {stepsList.length > 0 && (
+                <div className="rounded-lg border border-slate-200 bg-slate-50/80 px-2.5 py-2 max-h-[190px] overflow-y-auto nowheel space-y-1">
+                  {stepsList.map((s) => (
+                    <div key={s.id} className="flex items-start gap-1.5 text-[11px] leading-snug">
+                      <span className="flex-shrink-0 mt-[1px]">{stepIcon[s.type] || "•"}</span>
+                      <div className="min-w-0">
+                        <span className={"font-medium " + (stepColor[s.type] || "text-slate-600")}>
+                          {s.label}
+                        </span>
+                        {s.detail && (
+                          <span
+                            className="text-slate-400"
+                            title={s.detail}
+                          >
+                            {" — "}
+                            {s.detail.length > 60 ? s.detail.slice(0, 60) + "…" : s.detail}
+                          </span>
+                        )}
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              )}
+              {hasTextOutput && (
+                <div className="markdown-output text-slate-700 text-sm">
+                  <div className="text-[10px] font-semibold uppercase tracking-wider text-indigo-500 mb-0.5">
+                    Agent answer
+                  </div>
+                  <ReactMarkdown>{boxData.output}</ReactMarkdown>
+                </div>
+              )}
+              {!hasTextOutput && !isRunning && stepsList.length === 0 && !hasError && (
+                <div className="text-slate-400 text-sm py-4 text-center">
+                  Type a task above and click <strong>Run</strong>. The agent will create and
+                  run boxes on this board, then report back here.
+                </div>
+              )}
+            </div>
+          );
+        })()}
+
         {/* Image upload box */}
         {isImage && (
           <div>
@@ -612,6 +772,125 @@ function BoxNode({ id, data, selected, type }: NodeProps) {
             />
           </div>
         )}
+
+        {/* Documents upload box — multi-file, drag & drop, extracted text
+            becomes the box's output for downstream prompt templating. */}
+        {isDocuments &&
+          (() => {
+            const docs = boxData.documents || [];
+            const totalChars = docs.reduce((s, d) => s + d.chars, 0);
+            const usable = docs.filter((d) => !d.error && d.text).length;
+            return (
+              <div className="nodrag space-y-2">
+                <div
+                  onClick={() => fileInputRef.current?.click()}
+                  onDragOver={(e) => {
+                    e.preventDefault();
+                    setDocDragOver(true);
+                  }}
+                  onDragLeave={() => setDocDragOver(false)}
+                  onDrop={(e) => {
+                    e.preventDefault();
+                    setDocDragOver(false);
+                    handleDocumentsUpload(e.dataTransfer.files);
+                  }}
+                  className={
+                    "cursor-pointer border-2 border-dashed rounded-lg p-4 text-center transition " +
+                    (docDragOver
+                      ? "border-slate-500 bg-slate-100"
+                      : "border-slate-300 hover:border-slate-400 hover:bg-slate-50")
+                  }
+                >
+                  <div className="text-2xl mb-1">📎</div>
+                  <div className="text-sm text-slate-500 font-medium">
+                    Click or drop files
+                  </div>
+                  <div className="text-[11px] text-slate-400 mt-1">
+                    PDF, DOCX, TXT, MD, CSV, JSON
+                  </div>
+                </div>
+
+                {docBusy > 0 && (
+                  <div className="flex items-center justify-center gap-2 text-xs text-slate-500 bg-slate-50 border border-slate-200 rounded-lg py-2">
+                    <span className="animate-spin inline-block">⏳</span>
+                    Extracting text from {docBusy} file{docBusy > 1 ? "s" : ""}…
+                  </div>
+                )}
+
+                {docs.length > 0 && (
+                  <div className="space-y-1.5">
+                    {docs.map((d) => (
+                      <div
+                        key={d.id}
+                        className="group flex items-start gap-2 rounded-lg border border-slate-200 bg-white px-2.5 py-2"
+                      >
+                        <span className="text-sm flex-shrink-0 mt-0.5">
+                          {documentIcon(d.ext)}
+                        </span>
+                        <div className="flex-1 min-w-0">
+                          <div
+                            className="text-[13px] font-medium text-slate-700 truncate"
+                            title={d.name}
+                          >
+                            {d.name}
+                          </div>
+                          <div className="text-[11px] text-slate-400">
+                            {formatBytes(d.size)}
+                            {d.error ? (
+                              <span className="text-red-500"> — {d.error}</span>
+                            ) : (
+                              <>
+                                {" · "}
+                                {d.chars.toLocaleString()} chars
+                                {d.truncated ? " (truncated)" : ""}
+                              </>
+                            )}
+                          </div>
+                          {d.url && (
+                            <a
+                              href={d.url}
+                              target="_blank"
+                              rel="noreferrer"
+                              className="text-[11px] text-indigo-500 hover:underline"
+                            >
+                              Open original ↗
+                            </a>
+                          )}
+                        </div>
+                        <button
+                          onClick={() => removeDocument(d.id)}
+                          className="w-5 h-5 rounded-full text-[10px] text-slate-400 hover:text-red-500 hover:bg-red-50 flex items-center justify-center flex-shrink-0 opacity-0 group-hover:opacity-100 transition"
+                          title="Remove this document"
+                        >
+                          ✕
+                        </button>
+                      </div>
+                    ))}
+                  </div>
+                )}
+
+                {docs.length > 0 && (
+                  <p className="text-[11px] text-slate-400 leading-snug px-0.5">
+                    {usable} of {docs.length} usable ·{" "}
+                    {totalChars.toLocaleString()} chars total — flows into
+                    connected boxes via {"{{inputs}}"}.
+                  </p>
+                )}
+
+                <input
+                  ref={fileInputRef}
+                  type="file"
+                  multiple
+                  accept={SUPPORTED_DOC_EXTS.map((e) => "." + e).join(",")}
+                  className="hidden"
+                  onChange={(e) => {
+                    handleDocumentsUpload(e.target.files);
+                    e.target.value = ""; // allow re-uploading the same file
+                  }}
+                />
+              </div>
+            );
+          })()}
 
         {/* AI box output — cartoon (image) */}
         {!isInputBox && isCartoon && (
@@ -654,7 +933,7 @@ function BoxNode({ id, data, selected, type }: NodeProps) {
         )}
 
         {/* AI box output — text (research, summarize) */}
-        {!isInputBox && !isCartoon && !isSlides && !isCode && (
+        {!isInputBox && !isCartoon && !isSlides && !isCode && !isAgent && (
           <div className="min-h-[80px]">
             {isRunning && (
               <div className="flex items-center gap-2 text-slate-400 text-sm py-4 justify-center">
@@ -896,8 +1175,17 @@ function BoxNode({ id, data, selected, type }: NodeProps) {
             className="flex-1 flex items-center justify-center gap-1.5 px-3 py-1.5 rounded-lg text-sm font-medium text-white transition disabled:opacity-50"
             style={{ backgroundColor: meta.color }}
           >
-            {isRunning ? "⏳ Running..." : "▶ Run"}
+            {isRunning ? (isAgent ? "⏳ Working…" : "⏳ Running...") : ("▶ Run")}
           </button>
+          {isAgent && isRunning && (
+            <button
+              onClick={() => stopAgent(id)}
+              className="px-2.5 py-1.5 rounded-lg text-sm transition bg-slate-100 text-slate-600 hover:bg-rose-50 hover:text-rose-600"
+              title="Ask the agent to stop after its current step"
+            >
+              ⏹ Stop
+            </button>
+          )}
           <button
             onClick={() => setShowSettings(!showSettings)}
             className={"px-2.5 py-1.5 rounded-lg text-sm transition " + (showSettings ? "bg-slate-200 text-slate-700" : "bg-slate-100 text-slate-500 hover:bg-slate-200")}
@@ -940,7 +1228,9 @@ function BoxNode({ id, data, selected, type }: NodeProps) {
           {!isCartoon && (
             <div>
               <label className="text-xs font-medium text-slate-500 block mb-1">
-                System Prompt (role / behavior)
+                {isAgent
+                  ? "Agent Protocol Prompt (advanced — the JSON action spec)"
+                  : "System Prompt (role / behavior)"}
               </label>
               <textarea
                 className="w-full text-xs rounded-lg border border-slate-200 p-2 font-mono text-slate-700 focus:outline-none focus:ring-2 focus:ring-blue-300 min-h-[60px] resize-y"
@@ -953,7 +1243,11 @@ function BoxNode({ id, data, selected, type }: NodeProps) {
           )}
           <div>
             <label className="text-xs font-medium text-slate-500 block mb-1">
-              {isCartoon ? "Prompt Template (text-to-image fallback)" : "Prompt Template"}
+              {isCartoon
+                ? "Prompt Template (text-to-image fallback)"
+                : isAgent
+                  ? "Extra guidance for the agent (optional)"
+                  : "Prompt Template"}
             </label>
             <textarea
               ref={promptRef}
