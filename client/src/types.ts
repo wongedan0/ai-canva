@@ -1,4 +1,4 @@
-export type BoxType = "idea" | "research" | "summarize" | "image" | "cartoon" | "slides" | "code" | "prd" | "devplan" | "ui" | "stitch" | "note" | "label" | "timer" | "custom";
+export type BoxType = "idea" | "research" | "summarize" | "image" | "cartoon" | "slides" | "code" | "prd" | "devplan" | "ui" | "stitch" | "redactor" | "note" | "label" | "timer" | "custom";
 
 export type BoxStatus = "idle" | "running" | "done" | "error";
 
@@ -243,6 +243,21 @@ export const BOX_TYPES: Record<BoxType, BoxTypeMeta> = {
     defaultSystemPrompt: "",
     defaultWidth: 440,
     defaultHeight: 420,
+  },
+  redactor: {
+    label: "Privacy Redactor",
+    icon: "🔒",
+    color: "#000000",
+    description: "Redact Personally identifiable information (PII) from text",
+    hasAI: true,
+    category: "worker",
+    roles: ["everyone"],
+    defaultPrompt:
+      "Find all Personally identifiable information (PII) in the text such names, emails, phone numbers, etc. Replace each PII with a placeholder such as NAME_1, EMAIL_1, PHONE_NUMBER_1, etc",
+    defaultSystemPrompt:
+      "You are a privacy redactor system. You find PII in text and replace it with placeholder",
+    defaultWidth: 320,
+    defaultHeight: 320,
   },
   note: {
     label: "Note",
