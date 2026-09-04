@@ -1,4 +1,4 @@
-# Sprint 1
+# Sprint 1 Week 1
 - [x] Read the "What is AI Canva?" guide
 - [x] Read your brief and pick your box / lock your team roles
 - [x] Choose your research question and find 3 sources
