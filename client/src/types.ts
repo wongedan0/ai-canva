@@ -377,9 +377,9 @@ export const BOX_TYPES: Record<BoxType, BoxTypeMeta> = {
     category: "worker",
     roles: ["everyone"],
     defaultPrompt:
-      "Find all Personally identifiable information (PII) in the text such names, emails, phone numbers, etc. Replace each PII with a placeholder such as NAME_1, EMAIL_1, PHONE_NUMBER_1, etc",
+      "Find all Personally identifiable information (PII) in the text such names, emails, phone numbers, physical addresses, date of birth, and government ID or card numbers. Replace each PII with a placeholder such as NAME_1, EMAIL_1, PHONE_NUMBER_1, etc., reusing the same placeholder if the same value appears more than once. If no PII is found, return the text unchanged.\n\nReturn your answer in this format:\n\nREDACTED TEXT:\n<the text with placeholders>\n\nMAPPING:\n<a JSON object mapping each placeholder to the original value>",
     defaultSystemPrompt:
-      "You are a privacy redactor system. You find PII in text and replace it with placeholder",
+      "You are a privacy redactor system. You find PII in text and replace it with placeholder, while producing a mapping so the redaction can be reversed later. When uncertain whether something is PII, redact it and return the structured output requested.",
     defaultWidth: 320,
     defaultHeight: 320,
   },

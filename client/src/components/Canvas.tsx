@@ -37,6 +37,7 @@ const nodeTypes = {
   ui: BoxNode,
   stitch: BoxNode,
   swot: BoxNode,
+  redactor: BoxNode,
   note: BoxNode,
   label: BoxNode,
   timer: BoxNode,
