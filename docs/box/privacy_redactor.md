@@ -43,3 +43,23 @@ The mapping is not stored in Firestore or `localStorage`. It is generated in-mem
 **Rationale:** Storing the mapping server-side means trusting that persistence layer to keep PII safe indefinitely. By not saving the mapping to Google/Firestore, that dependency is removed entirely — no database to secure and no future breach to worry about. The safest place to keep a user's own mapping is the user's own device.
 
 **Trade-off:** if the user does not download the mapping before re-running the box or closing the page, it is unrecoverable.
+
+# Sprint 2 Week 1
+- [x] Clone the repo and get it running (npm run dev)
+- [x] Register another box in types.ts
+- [x] Continue with the chosen research
+
+### What it does
+Rewrites jargon text into plain language at a target reading
+level (roughly 8th-grade), while preserving every fact, number, and
+instruction from the source. Registered as boxType "plainlang" in types.ts.
+
+### Prompt design
+Two deliberate choices:
+1. The prompt requires the model to return both a PLAIN VERSION and a
+   TERMS KEPT list — any term it couldn't simplify, with a short plain
+   explanation. This makes "what did the rewrite lose or keep opaque"
+   an observable output, not just an assumption.
+2. Uses {{input_1}} rather than {{inputs}} — the box is designed to
+   simplify one source text at a time (from an Idea, Documents, or
+   Research box), not synthesize multiple inputs like Summarize does.
