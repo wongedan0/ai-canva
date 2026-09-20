@@ -1,4 +1,4 @@
-export type BoxType = "agent" | "idea" | "research" | "summarize" | "image" | "documents" | "cartoon" | "slides" | "code" | "prd" | "devplan" | "ui" | "stitch" | "swot" | "redactor" | "note" | "label" | "timer" | "custom";
+export type BoxType = "agent" | "idea" | "research" | "summarize" | "image" | "documents" | "cartoon" | "slides" | "code" | "prd" | "devplan" | "ui" | "stitch" | "swot" | "translator" | "redactor" | "note" | "label" | "timer" | "custom";
 
 export type BoxStatus = "idle" | "running" | "done" | "error";
 
@@ -367,6 +367,31 @@ export const BOX_TYPES: Record<BoxType, BoxTypeMeta> = {
       "You are a business analyst. Produce a clear, balanced SWOT analysis in Markdown. Be specific and honest about weaknesses.",
     defaultWidth: 320,             // starting box width
     defaultHeight: 320,            // starting box height
+  },
+  translator: {
+    label: "Plain Language Translator",
+    icon: "🗣️",
+    color: "#0d9488",
+    description: "Rewrite jargon text into plain language at a target reading level",
+    hasAI: true,
+    category: "worker",
+    roles: ["everyone"],
+    defaultPrompt:
+      "Rewrite the following text in plain language, suitable for a general adult reader at roughly an 8th-grade (age 13) reading level. " +
+      "Keep every factual claim, number, and instruction intact — do not omit, soften, or invent information. " +
+      "Replace jargon and technical terms with everyday words, or briefly explain them in plain terms the first time they appear. " +
+      "Prefer short sentences and common words. Break up long paragraphs.\n\n" +
+      "Return your answer in this exact format:\n\n" +
+      "PLAIN VERSION:\n<the rewritten text>\n\n" +
+      "TERMS KEPT:\n<a short list of any technical terms you had to keep, with a one-line plain-language explanation for each — or \"None\" if there are none>\n\n" +
+      "Text:\n{{input_1}}",
+    defaultSystemPrompt:
+      "You are a plain-language editor. Your job is fidelity, not simplicity for its own sake: every fact, figure, condition, and caveat in the source must survive the rewrite. " +
+      "You never remove information to make text shorter or easier — you only change vocabulary, sentence length, and structure. " +
+      "When a technical term truly cannot be avoided (e.g. a legal or medical term with no plain equivalent), keep it and explain it briefly rather than mistranslating it. " +
+      "Follow the requested output format exactly.",
+    defaultWidth: 320,
+    defaultHeight: 320,
   },
   redactor: {
     label: "Privacy Redactor",
