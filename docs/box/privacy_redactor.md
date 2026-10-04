@@ -69,3 +69,14 @@ Two deliberate choices:
 
 ## Domain Context
 Microsoft Presidio represents the current state of practice for enterprise PII detection. It combines regex-based recognisers with a spaCy NER backend to identify structured entities such as emails and phone number (Jathanna, 2026). It is deterministic and produces identical output for identical input, but it only covers limited patterns it was built to recognise. A study by Vats et. al (2026) reported that on locked 1,000-record sample, Claude Sonnet 4.6 leads partial-overlap micro-F1, followed by GPT-4.1, while the stratified results show that rule-based detection such as Presidio is weakest on HIGH-sensitivity and non-verbatim PII. LLM such as earlier mentioned Claude or GPT, achieve this by reasoning about the context rather than matching fixed patterns. However, they can hallucinate because they are inherently probabilistic.
+
+# Sprint 2 Week 2
+- [x] Continue with the "Is LLM redaction trustworthy vs deterministic tools?" research
+
+## Design rationale
+An LLM was chosen over a deterministic tool such as Microsoft Presidio because rule-based detection was shown to be weakest to catch HIGH-sensitivity PII (Vats et al. 2026). Reflecting this choice, when a user enters a text containing PII and connects it to Privacy Redactor box, the box makes a query to model available in Ollama such as gemma4:31b to replace each PII entity with a placeholder (e.g. NAME_1) rather than deleting the text. This design will keep the document structure and the redacted output useable as an input for the following boxes such as Summarize box.
+
+## Alternatives
+Deterministic tools such as Microsoft Presidio are reproducible, but they miss most HIGH-sensitivity PII that has no fixed pattern (Vats et al., 2026).
+Local open-source LLMs such as Llama 3.3 would keep PII entirely on the user’s device rather than sending unredacted text to a Ollama to be scanned.
+Human review will remain the most accurate option and avoids sending data anywhere at all but does not scale to large volumes of text.
