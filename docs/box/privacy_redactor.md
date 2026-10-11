@@ -70,7 +70,7 @@ Two deliberate choices:
 ## Domain Context
 Microsoft Presidio represents the current state of practice for enterprise PII detection. It combines regex-based recognisers with a spaCy NER backend to identify structured entities such as emails and phone number (Jathanna, 2026). It is deterministic and produces identical output for identical input, but it only covers limited patterns it was built to recognise. A study by Vats et. al (2026) reported that on locked 1,000-record sample, Claude Sonnet 4.6 leads partial-overlap micro-F1, followed by GPT-4.1, while the stratified results show that rule-based detection such as Presidio is weakest on HIGH-sensitivity and non-verbatim PII. LLM such as earlier mentioned Claude or GPT, achieve this by reasoning about the context rather than matching fixed patterns. However, they can hallucinate because they are inherently probabilistic.
 
-# Sprint 2 Week 2
+# Sprint 2 Week 3
 - [x] Continue with the "Is LLM redaction trustworthy vs deterministic tools?" research
 
 ## Design rationale
@@ -80,3 +80,28 @@ An LLM was chosen over a deterministic tool such as Microsoft Presidio because r
 Deterministic tools such as Microsoft Presidio are reproducible, but they miss most HIGH-sensitivity PII that has no fixed pattern (Vats et al., 2026).
 Local open-source LLMs such as Llama 3.3 would keep PII entirely on the user’s device rather than sending unredacted text to a Ollama to be scanned.
 Human review will remain the most accurate option and avoids sending data anywhere at all but does not scale to large volumes of text.
+
+# Sprint 3 Week 1
+- [x] Finalise research report for "Is LLM redaction trustworthy vs deterministic tools?" research
+- [x] Revise research report for "Is LLM redaction trustworthy vs deterministic tools?" research
+
+## Ethical & Social Considerations
+Over Redaction
+Because the box is tuned towards recall, it will sometimes remove content that is not PII, such as a place name or a medical term mistaken for a name. In most pipelines this is a minor loss. Where a downstream decision depends on the removed content, it can distort the result without anyone noticing.
+Sensitive Mapping
+The reversible mapping is a key to re-identification. A plain text file downloaded to a shared computer reintroduces the risk the box was built to remove. Choosing not to persist it server-side gives responsibility for the file to the user.
+Unequal Protection
+Detection quality cannot be assumed to be the same across people. Mehrabi et al. (2022) stated that in the cases where underlying training data contains biases, the algorithms trained on them will learn these biases and reflect them into their predictions, resulting in biased outcomes. So, a PII detector may protect some people’s names less reliability than others. Further, Mansfield et al. (2022) evaluated the performance of three off-the-shelf PII masking systems, Amazon Web Services, Google Cloud Platform Data Loss Prevention, and Microsoft Presidio, on names and redaction and found that all of them showed all three systems demonstrate significant differences in error rate based on demographics, with the highest error rates occurred for names associated with Black and Asian/Pacific Islander individuals.
+Model Server Exposure
+Whichever model is used, the unredacted text reaches it before any protection is applied. This is an inherent limit of LLM redaction and the strongest argument for a deterministic model that can run on the user’s own device.
+Guardrails
+The box needs the following guardrails:
+•	Display Disclaimer: Display a notice that the best method and that a person must review the output before it is shared
+•	Regex Validation: implement regex validation for structured PII such as emails, phone numbers, and card numbers
+•	No server-side persistence mapping: Never store the PII in the database and warn the user when it is downloaded
+
+## Answer to the research question
+LLM redaction is not simply more trustworthy than deterministic redaction. The two approaches fail in different ways.
+•	Deterministic tools (Microsoft Presidio): predictable, auditable, reproducible, and keep data on device, but weakest on HIGH-sensitivity (Vats et al., 2026).
+•	LLM (gemma4:31b, Claude, GPT): huge coverage that can catch HIGH-sensitivity, context dependent PII via context reasoning rather than fixed pattern, but not reproducible across runs, and the unredacted text must reach the model server before any protection is applied.
+Neither tool is trustworthy on its own. Deterministic tools are safe but incomplete; LLMs catch more but cannot be fully predicted. Trust in a redaction system should come from its structure rather than from the confidence of one component: a deterministic pass for structured identifiers, an LLM pass for contextual ones, and human review where the stakes justify it.
