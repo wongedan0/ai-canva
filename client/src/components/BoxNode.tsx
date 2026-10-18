@@ -29,6 +29,7 @@ import {
 import type { BoxDocument } from "../types.js";
 import sdk from "@stackblitz/sdk";
 import { toStackBlitzProject } from "../lib/project.js";
+import { downloadMapping, hasMapping } from "../lib/redaction";
 // Lazy-load the code editor so CodeMirror (~500KB) is only fetched when a
 // code box's Code tab is actually opened, keeping the initial bundle small.
 const CodeEditor = lazy(() => import("./CodeEditor.js"));
@@ -1217,6 +1218,21 @@ function BoxNode({ id, data, selected, type }: NodeProps) {
                 ⚡ Open in StackBlitz
               </button>
             </>
+          )}
+          {/* Privacy Redactor: download the in-memory mapping (never stored) */}
+          {boxType === "redactor" && boxData.status === "done" && (
+            <button
+              onClick={() => downloadMapping(id)}
+              disabled={!hasMapping(id)}
+              className="px-2.5 py-1.5 rounded-lg text-xs font-medium transition bg-slate-100 text-slate-600 hover:bg-slate-200 whitespace-nowrap disabled:opacity-40 disabled:cursor-not-allowed"
+              title={
+                hasMapping(id)
+                  ? "Download the redaction mapping (contains the original PII)"
+                  : "No mapping available. Re-run the box to generate one."
+              }
+            >
+              ⬇ Mapping
+            </button>
           )}
         </div>
       )}

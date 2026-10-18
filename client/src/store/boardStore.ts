@@ -43,6 +43,7 @@ import type { PresenceUser } from "../types.js";
 import { useAuthStore } from "./authStore.js";
 import { getUserEmail } from "../lib/admin.js";
 import { useTokenStore } from "./tokenStore.js";
+import { parseRedactorResponse, setMapping } from "../lib/redaction";
 
 function makeId(): string {
   return `box-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
@@ -820,6 +821,16 @@ export const useBoardStore = create<BoardState>()(
               // SWOT is just text output — the AI already formatted it as Markdown.
               get().updateBoxData(id, {
                 output: result.content,
+                status: "done",
+                error: undefined,
+              });
+            } else if (boxType === "redactor") {
+              // Only the redacted text flows downstream. The mapping stays in memory
+              // (lib/redaction.ts) and is never written to boxData or Firestore.
+              const { redactedText, mapping } = parseRedactorResponse(result.content);
+              setMapping(id, mapping);
+              get().updateBoxData(id, {
+                output: redactedText,
                 status: "done",
                 error: undefined,
               });
