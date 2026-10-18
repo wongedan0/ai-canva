@@ -105,3 +105,21 @@ LLM redaction is not simply more trustworthy than deterministic redaction. The t
 •	Deterministic tools (Microsoft Presidio): predictable, auditable, reproducible, and keep data on device, but weakest on HIGH-sensitivity (Vats et al., 2026).
 •	LLM (gemma4:31b, Claude, GPT): huge coverage that can catch HIGH-sensitivity, context dependent PII via context reasoning rather than fixed pattern, but not reproducible across runs, and the unredacted text must reach the model server before any protection is applied.
 Neither tool is trustworthy on its own. Deterministic tools are safe but incomplete; LLMs catch more but cannot be fully predicted. Trust in a redaction system should come from its structure rather than from the confidence of one component: a deterministic pass for structured identifiers, an LLM pass for contextual ones, and human review where the stakes justify it.
+
+# Sprint 3 Week 2
+- [x] Implement a click-to-download button for the Privacy Redactor's redaction mapping
+- [x] Add unit tests for the redaction helpers and test the box manually with sample text
+
+## Click-to-Download Mapping
+
+### What Was Built
+The Privacy Redactor box now parses the model's response into two parts: the REDACTED TEXT and the MAPPING. Only the redacted text is saved as the box's output and flows to downstream boxes such as Summarize. The mapping is shown to the user through a "⬇ Mapping" button in the box footer, which downloads it as a dated `.txt` file (e.g. `redaction-mapping-2026-10-18.txt`) after a warning that the file contains the original PII.
+
+### Where the Mapping Lives
+The mapping is held in memory only (`client/src/lib/redaction.ts`). It is not written to box data, Firestore, or localStorage, as specified in the Sprint 1 design. A unit test checks that nothing is written to localStorage or sessionStorage.
+
+**Trade-off:** if the page is reloaded or the box is re-run, the mapping is lost and the button is disabled until the box is run again. On a shared board, only the person who ran the box has the mapping.
+
+### Testing
+- **Unit tests:** parsing (code fences, missing or malformed JSON, repeated markers), the store, and the download.
+- **Manual test:** `Idea → Privacy Redactor → Summarize` with a sample support-ticket text containing a name, email, phone number, address, date of birth, and licence number. The download produced a valid JSON mapping with all items.
