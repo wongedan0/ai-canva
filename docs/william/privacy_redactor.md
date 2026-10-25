@@ -123,3 +123,9 @@ The mapping is held in memory only (`client/src/lib/redaction.ts`). It is not wr
 ### Testing
 - **Unit tests:** parsing (code fences, missing or malformed JSON, repeated markers), the store, and the download.
 - **Manual test:** `Idea → Privacy Redactor → Summarize` with a sample support-ticket text containing a name, email, phone number, address, date of birth, and licence number. The download produced a valid JSON mapping with all items.
+
+# Sprint 3 Week 3
+- [x] Make the presentation
+- [x] Record the presentation
+- [x] Complete the handover document
+- [x] Zip everything
